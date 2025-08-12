@@ -1,1 +1,2 @@
-from engine.framework.ecsp import *
+from engine.framework.ecsp import Ecs
+from engine.framework.ecsp import Entity
