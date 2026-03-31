@@ -1,0 +1,5 @@
+{
+    "map": [["tile", 2]],
+    "player": [["idle", 1]],
+    "bullet": [["shoot", 1]]
+}

@@ -6,6 +6,8 @@ from typing import Any, Iterable
 
 from collections import deque
 
+import engine.components as ecomp
+
 class Ecs:
     def __init__(self):
         self.__entities: dict[int, Entity] = dict()
@@ -13,6 +15,7 @@ class Ecs:
         self.__next_id: int = 0
         self.__id_pool: deque[int] = deque()
         self.__cache: dict[tuple[type[Any], ...], list[tuple[int, tuple[ReferenceType, ...]]]] = dict()
+        self.__cache_set: dict[tuple[type[Any], ...], set[int]] = dict()
         self.__cache_upd_flag: dict[tuple[type[Any], ...], int] = dict()
         self.__component_in_cache: dict[type[Any], list[tuple[type[Any], ...]]] = dict()
         self.__component_table: dict[type[Any], set[int]] = dict()
@@ -108,16 +111,20 @@ class Ecs:
                     self.__component_in_cache[comp_type].append(component_types)
                 
                 matching: set[int] = self._component_matches(self.__component_table, component_types)
-                cache: list[tuple[int, tuple[Any, ...]]] = [(entity_id, tuple(ref(comp) for comp in self.get_entity(entity_id).get_multiple(component_types))) for entity_id in matching] #type: ignore
+                cache: list[tuple[int, tuple[Any, ...]]] = [
+                    (
+                        entity_id,
+                        tuple(ref(comp) for comp in self.get_entity(entity_id).get_multiple(component_types)) # type: ignore
+                    ) for entity_id in matching
+                ]
                 self.__cache[component_types] = cache
+                self.__cache_set[component_types] = matching.copy()
             elif self.__cache_upd_flag[component_types] == 1:
                 cache: list[tuple[int, tuple[Any, ...]]] = self.__cache[component_types]
+                cache_set: set[int] = self.__cache_set[component_types]
                 self.__cache_upd_flag[component_types] = 0
                 new_matching: set[int] = self._component_matches(self.__new_buffer, component_types)
                 del_matching: set[int] = self._component_matches(self.__del_buffer, component_types)
-                new_matching = new_matching.difference(del_matching)
-
-                cache.extend([(entity_id, tuple(ref(comp) for comp in self.get_entity(entity_id).get_multiple(component_types))) for entity_id in new_matching]) #type: ignore
 
                 start = 0
                 end = len(cache) - 1
@@ -132,7 +139,20 @@ class Ecs:
 
                 num = len(cache) - end - 1
                 if num > 0:
+                    cache_set.difference_update([info[0] for info in cache[-num:]])
                     del cache[-num:]
+
+                new_matching.difference_update(del_matching)
+                new_matching.difference_update(self.__dead_entities)
+                new_matching.difference_update(cache_set)
+                cache_set.update(new_matching)
+
+                cache += [
+                    (
+                        entity_id,
+                        tuple(ref(comp) for comp in self.get_entity(entity_id).get_multiple(component_types)) #type: ignore
+                    ) for entity_id in new_matching
+                ]
             elif self.__cache_upd_flag[component_types] == 2:
                 self.__cache_upd_flag[component_types] = 0
                 cache: list[tuple[int, tuple[Any, ...]]] = self.__cache[component_types]
@@ -150,6 +170,7 @@ class Ecs:
 
                 num = len(cache) - end - 1
                 if num > 0:
+                    self.__cache_set[component_types].difference_update([info[0] for info in cache[-num:]])
                     del cache[-num:]
             yield from self.__cache[component_types]
         else:
@@ -159,13 +180,50 @@ class Ecs:
                 yield entity_id, tuple(entity.get(comp_type) for comp_type in component_types)
 
     def clear_buffer(self) -> None:
+        for comp_types, flag in self.__cache_upd_flag.items():
+            if flag == 1:
+                cache: list[tuple[int, tuple[Any, ...]]] = self.__cache[comp_types]
+                cache_set: set[int] = self.__cache_set[comp_types]
+                self.__cache_upd_flag[comp_types] = 0
+                new_matching: set[int] = self._component_matches(self.__new_buffer, comp_types)
+                del_matching: set[int] = self._component_matches(self.__del_buffer, comp_types)
+                
+                start = 0
+                end = len(cache) - 1
+                while start <= end and (cache[end][0] in del_matching or cache[end][0] in self.__dead_entities or cache[end][1][0]() is None):
+                    end -= 1
+                while start < end:
+                    if cache[start][0] in del_matching or cache[start][0] in self.__dead_entities or cache[start][1][0]() is None:
+                        cache[start], cache[end] = cache[end], cache[start]
+                        while start < end and (cache[end][0] in del_matching or cache[end][0] in self.__dead_entities or cache[end][1][0]() is None):
+                            end -= 1
+                    start += 1
+
+                num = len(cache) - end - 1
+                if num > 0:
+                    cache_set.difference_update([info[0] for info in cache[-num:]])
+                    del cache[-num:]
+
+                new_matching.difference_update(del_matching)
+                new_matching.difference_update(self.__dead_entities)
+                new_matching.difference_update(cache_set)
+                cache_set.update(new_matching)
+
+                cache += [
+                    (
+                        entity_id,
+                        tuple(ref(comp) for comp in self.get_entity(entity_id).get_multiple(comp_types)) #type: ignore
+                    ) for entity_id in new_matching
+                ]
         for buffer in self.__new_buffer.values():
             buffer.clear()
         for buffer in self.__del_buffer.values():
             buffer.clear()
 
-    def get_entity(self, entity_id: int) -> "Entity | None":
-        return self.__entities.get(entity_id)
+    def get_entity(self, entity_id: int) -> "Entity":
+        if entity_id not in self.__entities:
+            raise KeyError(f"Ecs::get_entity() error: the entity ID {entity_id} does not exist.")
+        return self.__entities[entity_id]
     
     def get_entites(self) -> Iterable[tuple[int, "Entity"]]:
         for entity_id, entity in self.__entities.items():
@@ -180,34 +238,30 @@ class Ecs:
     def get_dead_entities_size(self) -> int:
         return len(self.__dead_entities)
     
-    def get_new_buffer(self, component_type: type[Any]) -> frozenset[int] | None:
+    def get_new_buffer(self, component_type: type[Any]) -> frozenset[int]:
         if component_type not in self.__new_buffer:
-            return None
+            raise KeyError(f"Ecs::get_new_buffer() error: the new_buffer with the compoent type {component_type} does not exist.")
         return frozenset(self.__new_buffer[component_type])
     
-    def get_del_buffer(self, component_type: type[Any]) -> frozenset[int] | None:
+    def get_del_buffer(self, component_type: type[Any]) -> frozenset[int] :
         if component_type not in self.__del_buffer:
-            return None
+            raise KeyError(f"Ecs::get_new_buffer() error: the del_buffer with the compoent type {component_type} does not exist.")
         return frozenset(self.__del_buffer[component_type])
     
     def get_cache_size(self, *component_types: type[Any]) -> int:
         if component_types not in self.__cache:
-            print(f"Ecs::get_cache_size() error: the cache of combination {component_types} does not exist.")
-            return 0
+            raise KeyError(f"Ecs::get_cache_size() error: the cache of combination {component_types} does not exist.")
         return len(self.__cache[component_types])
     
     def get_cache_entity_ids(self, *component_types: type[Any]) -> Iterable[int]:
         if component_types not in self.__cache:
-            print(f"Ecs::get_cache_entity_ids() error: the cache of combination {component_types} does not exist.")
-            return
-        # print(len(self.__cache[component_types]))
+            raise KeyError(f"Ecs::get_cache_entity_ids() error: the cache of combination {component_types} does not exist.")
         for info in self.__cache[component_types]:
             yield info[0]
 
     def get_cache_components(self, *component_types: type[Any]) -> Iterable[tuple[ReferenceType, ...]]:
         if component_types not in self.__cache:
-            print(f"Ecs::get_cache_components() error: the cache of combination {component_types} does not exist.")
-            return
+            raise KeyError(f"Ecs::get_cache_components() error: the cache of combination {component_types} does not exist.")
         for info in self.__cache[component_types]:
             yield info[1]
     
@@ -220,8 +274,7 @@ class Ecs:
     def has_component(self, entity_id: int, *component_types: type[Any]) -> bool:
         entity: Entity | None = self.get_entity(entity_id)
         if entity is None:
-            print(f"Ecs::has_component() error: The entity of ID {entity_id} is not in the world.")
-            return False
+            raise KeyError(f"Ecs::has_component() error: The entity of ID {entity_id} is not in the world.")
         return entity.has(*component_types)
     
     def has_cache(self, *component_types: type[Any]) -> bool:
@@ -229,8 +282,7 @@ class Ecs:
     
     def cache_has_entities(self, component_types: tuple[type[Any], ...], *entity_ids: int) -> bool:
         if component_types not in self.__cache:
-            print(f"Ecs::cache_has_entities() error: the cache of combination {component_types} does not exist.")
-            return False
+            raise KeyError(f"Ecs::cache_has_entities() error: the cache of combination {component_types} does not exist.")
         return all(
             any(info[0] == eid and info[1][0]() is not None for info in self.__cache[component_types])
             for eid in entity_ids
@@ -252,8 +304,10 @@ class Entity:
         except KeyError:
             print(f"Entity::remove() error: the component {component_type} does not exist.")
 
-    def get(self, component_type: type[Any]) -> Any | None:
-        return self.__components.get(component_type)
+    def get(self, component_type: type[Any]) -> Any:
+        if component_type not in self.__components:
+            raise KeyError(f"Entity::get() error: The entity does not have the {component_type} component.")
+        return self.__components[component_type]
     
     def get_multiple(self, component_types: tuple[type[Any], ...]) -> tuple[Any, ...]:
         return tuple(self.__components.get(comp_type) for comp_type in component_types)

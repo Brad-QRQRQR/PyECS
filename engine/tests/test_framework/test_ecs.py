@@ -1,4 +1,6 @@
-from ...framework import *
+import esper
+
+from engine.framework import *
 
 from dataclasses import dataclass
 
@@ -177,35 +179,29 @@ class TestECS:
             cnt = 0
             for eid, (c2,) in self.ecs.query_with_component(C2):
                 assert eid in lst1 or eid in lst2
-                assert type(c2) is C2
+                assert type(c2()) is C2
                 cnt += 1
 
             assert cnt > 0
 
-            g = self.ecs.get_cache(C2)
-            assert g is not None
-            assert list(g.get_entity_ids()) == lst
+            assert self.ecs.has_cache(C2) is True
+            assert list(self.ecs.get_cache_entity_ids(C2)) == lst
             assert self.ecs.get_cache_size(C2) == len(lst)
 
         for eid, (c1, c2) in self.ecs.query_with_component(C1, C2):
-            assert type(c1) is C1 and type(c2) is C2
+            assert type(c1()) is C1 and type(c2()) is C2
             assert eid in lst1
 
-        g1 = self.ecs.get_cache(C1, C2)
-        g2 = self.ecs.get_cache(C2, C1)
-        assert g1 is not None and g2 is None
-        assert g1 is not g2
-        assert list(g1.get_entity_ids()) == lst1
+        assert self.ecs.has_cache(C1, C2) is True and self.ecs.has_cache(C2, C1) is False
+        assert list(self.ecs.get_cache_entity_ids(C1, C2)) == lst1
         assert self.ecs.get_cache_size(C1, C2) != self.ecs.get_cache_size(C2, C1)
 
         for eid, (c2, c1) in self.ecs.query_with_component(C2, C1):
-            assert type(c2) is C2 and type(c1) is C1
+            assert type(c2()) is C2 and type(c1()) is C1
             assert eid in lst1
         
-        g2 = self.ecs.get_cache(C2, C1)
-        assert g2 is not None
-        assert g1 is not g2
-        assert list(g1.get_entity_ids()) == list(g2.get_entity_ids())
+        assert self.ecs.has_cache(C2, C1) is True
+        assert list(self.ecs.get_cache_entity_ids(C1, C2)) == list(self.ecs.get_cache_entity_ids(C2, C1))
         assert self.ecs.get_cache_size(C1, C2) == self.ecs.get_cache_size(C2, C1)
 
     def test_get_new_buffer(self):
@@ -290,9 +286,8 @@ class TestECS:
         for eid, (c1,) in self.ecs.query_with_component(C1):
             pass
 
-        g = self.ecs.get_cache(C1)
-        assert g is not None
-        assert list(g.get_entity_ids()) == [0, 1, 2, 3, 4, 5, 12]
+        assert self.ecs.has_cache(C1) is True
+        assert list(self.ecs.get_cache_entity_ids(C1)) == [0, 1, 2, 3, 4, 5, 12]
 
     def test_remove_component_and_query_with_component(self):
         lst = [] 
@@ -305,10 +300,9 @@ class TestECS:
         for eid, (c1,) in self.ecs.query_with_component(C1):
             continue
 
-        st = self.ecs.get_cache(C1)
-        assert st is not None
-        assert st.has_entities(*[id for id in lst]) is True
-        assert st.has_entities(e) is False
+        assert self.ecs.has_cache(C1) is True
+        assert self.ecs.cache_has_entities((C1,), *[id for id in lst]) is True
+        assert self.ecs.cache_has_entities((C1,), e) is False
 
         self.ecs.clear_buffer()
 
@@ -318,10 +312,9 @@ class TestECS:
         for eid, (c1,) in self.ecs.query_with_component(C1):
             continue
 
-        st = self.ecs.get_cache(C1)
-        assert st is not None
-        assert st.has_entities(*[id for id in lst]) is True
-        assert st.has_entities(e) is False
+        assert self.ecs.has_cache(C1) is True
+        assert self.ecs.cache_has_entities((C1,), *[id for id in lst]) is True
+        assert self.ecs.cache_has_entities((C1,), e) is False
 
     def test_add_component_and_query_with_component(self):
         lst = []
@@ -336,12 +329,8 @@ class TestECS:
         for eid, (c1,) in self.ecs.query_with_component(C1):
             continue
 
-        st = self.ecs.get_cache(C1)
-        assert st is not None
-        assert st.has_entities(*lst2) is True
-
-        for eid, (c1,) in st.get_entities():
-            continue
+        assert self.ecs.has_cache(C1) is True
+        assert self.ecs.cache_has_entities((C1,), *lst2) is True
 
         self.ecs.clear_buffer()
 
@@ -352,9 +341,8 @@ class TestECS:
         for eid, (c1,) in self.ecs.query_with_component(C1):
             continue
 
-        st = self.ecs.get_cache(C1)
-        assert st is not None
-        assert st.has_entities(*lst2)
+        assert self.ecs.has_cache(C1) is True
+        assert self.ecs.cache_has_entities((C1,), *lst2)
 
     def test_remove_dead_entities_and_query_with_component(self):
         lst = []
@@ -374,9 +362,8 @@ class TestECS:
             cnt += 1
         assert cnt > 0
 
-        st = self.ecs.get_cache(C1)
-        assert st is not None
-        assert st.has_entities(*lst)
+        assert self.ecs.has_cache(C1) is True
+        assert self.ecs.cache_has_entities((C1,), *lst)
 
         self.ecs.clear_buffer()
 
@@ -392,9 +379,144 @@ class TestECS:
             cnt += 1
         assert cnt > 0
 
-        st = self.ecs.get_cache(C1)
-        assert st is not None
-        assert st.has_entities(*lst)
+        assert self.ecs.has_cache(C1) is True
+        assert self.ecs.cache_has_entities((C1,), *lst)
+
+
+N = 10000
+
+class TestA:
+    def test_a(self, benchmark):
+        self.ecs = None
+        def setup_me():
+            self.ecs = Ecs()
+            for _ in range(N):
+                self.ecs.register_entity(C1(), C2(), C3(), C4())
+            # self.ecs.query_with_component(C1, C2)
+            # self.ecs.query_with_component(C1, C3)
+            # self.ecs.query_with_component(C1, C4)
+            # self.ecs.query_with_component(C2, C3)
+            # self.ecs.query_with_component(C2, C4)
+            # self.ecs.query_with_component(C3, C4)
+            # self.ecs.query_with_component(C1, C2, C3)
+            # self.ecs.query_with_component(C1, C2, C4)
+            # self.ecs.query_with_component(C2, C3, C4)
+            # self.ecs.query_with_component(C1, C3, C4)
+        def func():
+            # for eid, (c1, c3) in self.ecs.query_with_component(C1, C3, to_cache = False):
+            #     c1.x += 1
+            #     c3.a += 1
+            # e = 3
+            # for _ in range(20):
+                # self.ecs.mark_dead_entity(e)
+                # self.ecs.remove_dead_entities()
+                # e += 1
+            for eid, (c1, c3, c2, c4) in self.ecs.query_with_component(C1, C3, C2, C4, to_cache = False):
+                c1.x += 1
+                c3.a += 1
+        benchmark.pedantic(func, setup=setup_me, rounds = 10)
+    
+    def test_c(self, benchmark):
+        self.ecs = None
+        def setup_me():
+            self.ecs = Ecs()
+            for _ in range(N):
+                self.ecs.register_entity(C1(), C2(), C3(), C4())
+            for eid, (c1, c3, c2, c4) in self.ecs.query_with_component(C1, C3, C2, C4):
+                c1().x += 1
+                c3().a += 1
+            # self.ecs.query_with_component(C1, C2)
+            # self.ecs.query_with_component(C1, C3)
+            # self.ecs.query_with_component(C1, C4)
+            # self.ecs.query_with_component(C2, C3)
+            # self.ecs.query_with_component(C2, C4)
+            # self.ecs.query_with_component(C3, C4)
+            # self.ecs.query_with_component(C1, C2, C3)
+            # self.ecs.query_with_component(C1, C2, C4)
+            # self.ecs.query_with_component(C2, C3, C4)
+            # self.ecs.query_with_component(C1, C3, C4)
+        def func():
+            # e = 3
+            # for _ in range(20):
+            #     self.ecs.mark_dead_entity(e)
+            #     self.ecs.remove_dead_entities()
+            #     e += 1
+            for eid, (c1, c3, c2, c4) in self.ecs.query_with_component(C1, C3, C2, C4):
+                # c1, c3 = deref_all(comps)
+                c11 = c1()
+                c22 = c2()
+                c33 = c3()
+                c44 = c4()
+                c11.x += 1
+                c33.a += 1
+        benchmark.pedantic(func, setup=setup_me, rounds = 50)
+
+    def test_d(self, benchmark):
+        self.ecs = None
+        def setup_me():
+            self.ecs = Ecs()
+            for _ in range(N):
+                self.ecs.register_entity(C1(), C2(), C3(), C4())
+            for eid, comps in self.ecs.query_with_component(C1, C3, C2, C4):
+                c1, c3, c2, c4 = deref_all(comps)
+                c1.x += 1
+                c3.a += 1
+            # self.ecs.query_with_component(C1, C2)
+            # self.ecs.query_with_component(C1, C3)
+            # self.ecs.query_with_component(C1, C4)
+            # self.ecs.query_with_component(C2, C3)
+            # self.ecs.query_with_component(C2, C4)
+            # self.ecs.query_with_component(C3, C4)
+            # self.ecs.query_with_component(C1, C2, C3)
+            # self.ecs.query_with_component(C1, C2, C4)
+            # self.ecs.query_with_component(C2, C3, C4)
+            # self.ecs.query_with_component(C1, C3, C4)
+        def func():
+            # e = 3
+            # for _ in range(20):
+                # self.ecs.mark_dead_entity(e)
+                # self.ecs.remove_dead_entities()
+                # e += 1
+            for eid, comps in self.ecs.query_with_component(C1, C3, C2, C4):
+                c1, c3, c2, c4 = deref_all(comps)
+                c1.x += 1
+                c3.a += 1
+        benchmark.pedantic(func, setup=setup_me, rounds = 10)
+
+class TestB:
+    def test_b(self, benchmark):
+        def setup():
+            # self.cc = 0
+            esper.clear_database()
+            for _ in range(N):
+                esper.create_entity(C1(), C2(), C3(), C4())
+            for eid, (c1, c3) in esper.get_components(C1, C3):
+                c1.x += 1
+                c3.a += 1
+            # esper.get_components(C1, C2)
+            # esper.get_components(C1, C3)
+            # esper.get_components(C1, C4)
+            # esper.get_components(C2, C3)
+            # esper.get_components(C2, C4)
+            # esper.get_components(C3, C4)
+            # esper.get_components(C1, C2, C3)
+            # esper.get_components(C1, C2, C4)
+            # esper.get_components(C2, C3, C4)
+            # esper.get_components(C1, C3, C4)
+        def func():
+            # for eid, (c1, c3) in esper.get_components(C1, C3):
+            #     c1.x += 1
+            #     c3.a += 1
+            # e = 3
+            # for _ in range(20):
+            #     esper.delete_entity(e, True)
+            #     e += 1
+            for eid, (c1, c3, c2, c4) in esper.get_components(C1, C3, C2, C4):
+                c1.x += 1
+                c3.a += 1
+
+        # benchmark(setup)
+        benchmark.pedantic(func, setup=setup, rounds=30)
 
 ############
 # component
